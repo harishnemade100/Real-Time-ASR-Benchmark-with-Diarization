@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-Main runner: stream_benchmark.py
-
-Usage example:
-python src/stream_benchmark.py --provider deepgram --api_key "..." --url "PODCAST_URL" --start 450 --duration 300 --segment_seconds 6 --reference_csv data/reference_segments.csv
-"""
-
 import argparse
 import asyncio
 import csv
@@ -20,17 +12,13 @@ from app.src.assemblyai_ws import connect as assembly_connect, start_stream as a
 from app.src.diarization_parser import parse_deepgram_event, parse_assemblyai_event
 from app.src.metrics import compute_wer
 from app.src.utils import iso_now
+from app.settings.constant import SAMPLE_RATE, CHUNK_MS, SAMPLE_WIDTH, CHANNELS, TRANSCRIPTS_JSONL, METRICS_CSV
 
 # Config
-SAMPLE_RATE = 16000
-CHANNELS = 1
-SAMPLE_WIDTH = 2  # bytes
-# chunk ms for sending - smaller => lower latency but more messages
-CHUNK_MS = 320
+
 CHUNK_BYTES = int(SAMPLE_RATE * (CHUNK_MS/1000.0) * SAMPLE_WIDTH * CHANNELS)
 
-TRANSCRIPTS_JSONL = "transcripts.jsonl"
-METRICS_CSV = "data/sample_metrics_{provider}.csv"
+
 
 class Runner:
     def __init__(self, provider: str, api_key: str, url: str, start: float, duration: float,
