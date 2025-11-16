@@ -1,0 +1,7 @@
+```csv
+segment_id,start_sec,end_sec,reference_text
+1,0,6,"Speaker 0: Hello, welcome back to the show. Today we're discussing urban design."
+2,6,12,"Speaker 1: Thank you for having me. I'm excited to be here."
+3,12,18,"Speaker 0: Great, let's start with the first question about transport planning."
+4,18,24,"Speaker 1: The main idea is to prioritize pedestrians and cyclists."
+5,24,30,"Speaker 0: How would you implement these changes practically?"
