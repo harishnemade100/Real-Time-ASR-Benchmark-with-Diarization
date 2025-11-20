@@ -1,256 +1,211 @@
-import argparse
+# app/main.py
+#!/usr/bin/env python3
+"""
+main.py — Real-time ASR Benchmark (NO FFMPEG VERSION)
+"""
+
 import asyncio
 import csv
 import json
 import time
 from pathlib import Path
-from typing import Optional
 
-from app.src.audio_reader import run_ffmpeg_stream, pcm_chunks_from_stdout
-from app.src.deepgram_ws import connect as deepgram_connect, send_audio as deepgram_send, close as deepgram_close
-from app.src.assemblyai_ws import connect as assembly_connect, start_stream as assembly_start, send_audio as assembly_send, stop_stream as assembly_stop
-from app.src.diarization_parser import parse_deepgram_event, parse_assemblyai_event
-from app.src.metrics import compute_wer
-from app.src.utils import iso_now
-from app.settings.constant import SAMPLE_RATE, CHUNK_MS, SAMPLE_WIDTH, CHANNELS, TRANSCRIPTS_JSONL, METRICS_CSV
+from settings.constant import (
+    DEFAULT_PROVIDER,
+    DEEPGRAM_API_KEY,
+    ASSEMBLYAI_API_KEY,
+    PODCAST_URL,
+    START_SEC,
+    DURATION_SEC,
+    SEGMENT_SECONDS,
+    REFERENCE_CSV
+)
 
-# Config
+from src.audio_reader import stream_audio_from_url
+from src.deepgram_ws import connect as dg_connect, send_audio as dg_send, close as dg_close
+from src.assemblyai_ws import connect as aa_connect, start_stream as aa_start, send_audio as aa_send, stop_stream as aa_stop
+from src.diarization_parser import parse_deepgram_event, parse_assemblyai_event
+from src.metrics import compute_wer
+from src.utils import iso_now
 
-CHUNK_BYTES = int(SAMPLE_RATE * (CHUNK_MS/1000.0) * SAMPLE_WIDTH * CHANNELS)
+SAMPLE_RATE = 16000
+CHANNELS = 1
+SAMPLE_WIDTH = 2
+CHUNK_MS = 320
+CHUNK_BYTES = int(SAMPLE_RATE * (CHUNK_MS / 1000) * SAMPLE_WIDTH * CHANNELS)
+
+TRANSCRIPT_LOG = "transcripts.jsonl"
+CSV_TEMPLATE = "data/metrics_{provider}.csv"
 
 
+class ASRBenchmark:
 
-class Runner:
-    def __init__(self, provider: str, api_key: str, url: str, start: float, duration: float,
-                 segment_seconds: float = 6.0, reference_csv: Optional[str]=None):
+    def __init__(self, provider):
         self.provider = provider.lower()
-        self.api_key = api_key
-        self.url = url
-        self.start = start
-        self.duration = duration
-        self.segment_seconds = segment_seconds
-        self.reference_csv = reference_csv
+        self.api_key = DEEPGRAM_API_KEY if self.provider == "deepgram" else ASSEMBLYAI_API_KEY
+
+        self.url = PODCAST_URL
+        self.segment_seconds = SEGMENT_SECONDS
+        self.start = START_SEC
+        self.duration = DURATION_SEC
+
+        self.reference_map = self._load_reference(REFERENCE_CSV)
         self.metrics = []
-        self.transcripts_f = open(TRANSCRIPTS_JSONL, "w", encoding="utf-8")
-        # reference map segment_id -> reference_text
-        self.reference_map = {}
-        if reference_csv:
-            try:
-                with open(reference_csv, newline='', encoding='utf-8') as fh:
-                    reader = csv.DictReader(fh)
-                    for r in reader:
-                        sid = int(r['segment_id'])
-                        self.reference_map[sid] = r['reference_text']
-            except FileNotFoundError:
-                print("Reference CSV not found:", reference_csv)
+        self.raw_log = open(TRANSCRIPT_LOG, "w", encoding="utf-8")
+
+    def _load_reference(self, path):
+        if not Path(path).exists():
+            print(f"⚠ Reference CSV missing: {path}")
+            return {}
+        out = {}
+        with open(path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                out[int(row["segment_id"])] = row["reference_text"]
+        print(f"Loaded {len(out)} reference segments.")
+        return out
 
     async def run(self):
-        ff = run_ffmpeg_stream(self.url, self.start, self.duration, sample_rate=SAMPLE_RATE)
-        print(f"[{iso_now()}] Started ffmpeg PID {ff.pid}")
+        print(f"\n🚀 Starting ASR Benchmark: {self.provider.upper()}")
+        print(f"🎧 Streaming audio (NO FFMPEG): {self.url}")
+
         if self.provider == "deepgram":
-            await self._run_deepgram(ff)
-        elif self.provider == "assemblyai":
-            await self._run_assemblyai(ff)
+            await self.run_deepgram()
         else:
-            raise ValueError("Unknown provider")
-        ff.kill()
-        self.transcripts_f.close()
-        self._write_metrics()
+            await self.run_assemblyai()
 
-    def _write_metrics(self):
-        out = METRICS_CSV.format(provider=self.provider)
-        Path("data").mkdir(parents=True, exist_ok=True)
-        keys = ["provider_name","segment_id","start_timestamp_sec","final_text_timestamp_iso","latency_ms","hypothesis_text","reference_text","S","I","D","N"]
-        with open(out, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=keys)
-            writer.writeheader()
-            for r in self.metrics:
-                writer.writerow(r)
-        print(f"Wrote metrics to {out}")
+        self.raw_log.close()
+        self._save_csv()
 
-    async def _run_deepgram(self, ff_proc):
-        ws = await deepgram_connect(self.api_key, sample_rate=SAMPLE_RATE, diarize=True)
-        print("Connected to Deepgram")
-        # spawn listener
-        listener = asyncio.create_task(self._deepgram_listener(ws))
-        buffer = bytearray()
+    async def run_deepgram(self):
+        ws = await dg_connect(self.api_key)
+        print("✔ Connected to Deepgram")
+
+        listener = asyncio.create_task(self._listen_deepgram(ws))
+        audio_stream = stream_audio_from_url(self.url, CHUNK_BYTES)
+
         seg_bytes = int(self.segment_seconds * SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
-        seg_start_audio_offset = self.start
+        buffer = bytearray()
+        seg_start = self.start
         seg_id = 0
+
         try:
-            for chunk in pcm_chunks_from_stdout(ff_proc, CHUNK_BYTES):
-                await deepgram_send(ws, chunk)
+            for chunk in audio_stream:
+                await dg_send(ws, chunk)
                 buffer += chunk
                 if len(buffer) >= seg_bytes:
                     seg_id += 1
-                    # record send time for this segment
-                    t_send = time.time()
-                    # store a row placeholder (complete when final arrives)
-                    row = {
-                        "provider_name": "Deepgram",
-                        "segment_id": seg_id,
-                        "start_timestamp_sec": round(seg_start_audio_offset,3),
-                        "final_text_timestamp_iso": "",
-                        "latency_ms": "",
-                        "hypothesis_text": "",
-                        "reference_text": self.reference_map.get(seg_id,""),
-                        "S":"","I":"","D":"","N":""
-                    }
-                    # attach t_send for latency computation
-                    row["_t_send"] = t_send
-                    self.metrics.append(row)
-                    seg_start_audio_offset += self.segment_seconds
+                    self._start_segment(seg_id, seg_start)
+                    seg_start += self.segment_seconds
                     buffer = bytearray()
                 await asyncio.sleep(0)
-            # send close message
-            await deepgram_close(ws)
-            await asyncio.sleep(2.0)
+            await dg_close(ws)
+            await asyncio.sleep(1)
         finally:
             listener.cancel()
-            try:
-                await listener
-            except Exception:
-                pass
 
-    async def _deepgram_listener(self, ws):
-        # listen to events
+    async def _listen_deepgram(self, ws):
         async for msg in ws:
             if isinstance(msg, bytes):
                 continue
-            try:
-                j = json.loads(msg)
-            except Exception:
-                continue
-            # write raw event
-            self.transcripts_f.write(json.dumps({"provider":"deepgram","event":j,"iso":iso_now()}) + "\n")
-            # try parsing diarized utterances
-            utts = []
-            try:
-                utts = parse_deepgram_event(j)
-            except Exception:
-                pass
+            event = json.loads(msg)
+            self._log_raw("deepgram", event)
+            utts = parse_deepgram_event(event)
             if utts:
-                # print diarized utterances
-                for u in utts:
-                    print(f"Speaker {u['speaker']}: {u['text']}")
-                # find next metrics row without final_text set
-                for row in reversed(self.metrics):
-                    if row['final_text_timestamp_iso'] == "":
-                        row['final_text_timestamp_iso'] = iso_now()
-                        if "_t_send" in row:
-                            try:
-                                row['latency_ms'] = int((time.time() - row['_t_send'])*1000)
-                            except Exception:
-                                row['latency_ms'] = ""
-                        row['hypothesis_text'] = " | ".join([f"Speaker {u['speaker']}: {u['text']}" for u in utts])
-                        # compute WER if reference exists
-                        ref = row.get('reference_text','')
-                        if ref:
-                            try:
-                                S,I,D,N = compute_wer(ref, row['hypothesis_text'])
-                                row['S'], row['I'], row['D'], row['N'] = S,I,D,N
-                            except Exception:
-                                pass
-                        break
+                self._finalize_segment(utts)
 
-    async def _run_assemblyai(self, ff_proc):
-        ws = await assembly_connect(self.api_key, sample_rate=SAMPLE_RATE)
-        print("Connected to AssemblyAI")
-        await assembly_start(ws)
-        listener = asyncio.create_task(self._assembly_listener(ws))
-        buffer = bytearray()
+    async def run_assemblyai(self):
+        ws = await aa_connect(self.api_key)
+        await aa_start(ws)
+        print("✔ Connected to AssemblyAI")
+
+        listener = asyncio.create_task(self._listen_assembly(ws))
+        audio_stream = stream_audio_from_url(self.url, CHUNK_BYTES)
+
         seg_bytes = int(self.segment_seconds * SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
-        seg_start_audio_offset = self.start
+        buffer = bytearray()
+        seg_start = self.start
         seg_id = 0
+
         try:
-            for chunk in pcm_chunks_from_stdout(ff_proc, CHUNK_BYTES):
-                await assembly_send(ws, chunk)
+            for chunk in audio_stream:
+                await aa_send(ws, chunk)
                 buffer += chunk
                 if len(buffer) >= seg_bytes:
                     seg_id += 1
-                    t_send = time.time()
-                    row = {
-                        "provider_name": "AssemblyAI",
-                        "segment_id": seg_id,
-                        "start_timestamp_sec": round(seg_start_audio_offset,3),
-                        "final_text_timestamp_iso": "",
-                        "latency_ms": "",
-                        "hypothesis_text": "",
-                        "reference_text": self.reference_map.get(seg_id,""),
-                        "S":"","I":"","D":"","N":""
-                    }
-                    row["_t_send"] = t_send
-                    self.metrics.append(row)
-                    seg_start_audio_offset += self.segment_seconds
+                    self._start_segment(seg_id, seg_start)
+                    seg_start += self.segment_seconds
                     buffer = bytearray()
                 await asyncio.sleep(0)
-            # stop stream
-            await assembly_stop(ws)
-            await asyncio.sleep(2.0)
+            await aa_stop(ws)
+            await asyncio.sleep(1)
         finally:
             listener.cancel()
-            try:
-                await listener
-            except Exception:
-                pass
 
-    async def _assembly_listener(self, ws):
+    async def _listen_assembly(self, ws):
         async for msg in ws:
             if isinstance(msg, bytes):
                 continue
-            try:
-                j = json.loads(msg)
-            except Exception:
-                continue
-            # write raw event
-            self.transcripts_f.write(json.dumps({"provider":"assemblyai","event":j,"iso":iso_now()}) + "\n")
-            # parse utterances
-            utts = []
-            try:
-                utts = parse_assemblyai_event(j)
-            except Exception:
-                pass
+            event = json.loads(msg)
+            self._log_raw("assemblyai", event)
+            utts = parse_assemblyai_event(event)
             if utts:
-                for u in utts:
-                    print(f"Speaker {u['speaker']}: {u['text']}")
-                for row in reversed(self.metrics):
-                    if row['final_text_timestamp_iso'] == "":
-                        row['final_text_timestamp_iso'] = iso_now()
-                        try:
-                            row['latency_ms'] = int((time.time() - row['_t_send'])*1000)
-                        except Exception:
-                            row['latency_ms'] = ""
-                        # join utterances texts
-                        row['hypothesis_text'] = " | ".join([f"Speaker {u['speaker']}: {u['text']}" for u in utts])
-                        ref = row.get('reference_text','')
-                        if ref:
-                            try:
-                                S,I,D,N = compute_wer(ref, row['hypothesis_text'])
-                                row['S'], row['I'], row['D'], row['N'] = S,I,D,N
-                            except Exception:
-                                pass
-                        break
+                self._finalize_segment(utts)
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--provider", required=True, choices=["deepgram","assemblyai"])
-    p.add_argument("--api_key", required=True)
-    p.add_argument("--url", required=True)
-    p.add_argument("--start", type=float, default=0.0)
-    p.add_argument("--duration", type=float, default=300.0)
-    p.add_argument("--segment_seconds", type=float, default=6.0)
-    p.add_argument("--reference_csv", default=None)
-    return p.parse_args()
+    def _log_raw(self, provider, event):
+        self.raw_log.write(json.dumps({
+            "provider": provider,
+            "event": event,
+            "time": iso_now()
+        }) + "\n")
+
+    def _start_segment(self, seg_id, start_sec):
+        row = {
+            "provider_name": self.provider,
+            "segment_id": seg_id,
+            "start_timestamp_sec": start_sec,
+            "final_text_timestamp_iso": "",
+            "latency_ms": "",
+            "hypothesis_text": "",
+            "reference_text": self.reference_map.get(seg_id, ""),
+            "_send_time": time.time(),
+        }
+        self.metrics.append(row)
+
+    def _finalize_segment(self, utts):
+        for u in utts:
+            print(f"🗣 Speaker {u['speaker']}: {u['text']}")
+        for row in reversed(self.metrics):
+            if not row["final_text_timestamp_iso"]:
+                row["final_text_timestamp_iso"] = iso_now()
+                row["latency_ms"] = int((time.time() - row["_send_time"]) * 1000)
+                row["hypothesis_text"] = " | ".join(
+                    f"Speaker {u['speaker']}: {u['text']}" for u in utts
+                )
+                ref = row["reference_text"]
+                if ref:
+                    S, I, D, N = compute_wer(ref, row["hypothesis_text"])
+                    row.update({"S": S, "I": I, "D": D, "N": N})
+                break
+
+    def _save_csv(self):
+        filename = CSV_TEMPLATE.format(provider=self.provider)
+        Path("data").mkdir(exist_ok=True)
+        keys = [
+            "provider_name", "segment_id", "start_timestamp_sec",
+            "final_text_timestamp_iso", "latency_ms",
+            "hypothesis_text", "reference_text", "S", "I", "D", "N"
+        ]
+        with open(filename, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys)
+            w.writeheader()
+            for row in self.metrics:
+                w.writerow({k: row.get(k, "") for k in keys})
+        print(f"\n📄 Metrics saved: {filename}")
+
 
 async def main():
-    args = parse_args()
-    runner = Runner(provider=args.provider, api_key=args.api_key, url=args.url,
-                    start=args.start, duration=args.duration, segment_seconds=args.segment_seconds,
-                    reference_csv=args.reference_csv)
-    await runner.run()
+    benchmark = ASRBenchmark(DEFAULT_PROVIDER)
+    await benchmark.run()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Interrupted")
+    asyncio.run(main())

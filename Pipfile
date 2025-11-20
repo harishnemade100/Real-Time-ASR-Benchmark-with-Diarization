@@ -4,7 +4,12 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-websockets = "*"
 numpy = "*"
+miniaudio = "*"
+websockets = "==11.0.3"
+pydub = "*"
+ffmpeg-python = "*"
+requests = "*"
+ffmpeg-downloader = "*"
 
 [dev-packages]

@@ -1,35 +1,63 @@
 """
 audio_reader.py
-
-Small helper to spawn ffmpeg that reads a remote URL or local file and outputs PCM16LE to stdout.
+MP3 → PCM16 streaming decoder using ffmpeg-python.
+Works on Windows with NO system installation of ffmpeg.
 """
 
+import os
 import subprocess
+from ffmpeg_downloader import FFmpegDownloader
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-SAMPLE_WIDTH = 2  # bytes
+SAMPLE_WIDTH = 2  # 16-bit PCM
 
-def run_ffmpeg_stream(url: str, start_s: float, duration_s: float, sample_rate: int = SAMPLE_RATE) -> subprocess.Popen:
-    args = [
-        "ffmpeg",
-        "-ss", str(start_s),
-        "-i", url,
-        "-t", str(duration_s),
-        "-ar", str(sample_rate),
-        "-ac", str(CHANNELS),
-        "-f", "s16le",
-        "-hide_banner",
-        "-loglevel", "error",
-        "pipe:1"
-    ]
-    p = subprocess.Popen(args, stdout=subprocess.PIPE, bufsize=0)
-    return p
 
-def pcm_chunks_from_stdout(proc: subprocess.Popen, chunk_bytes: int):
-    assert proc.stdout is not None
+def get_ffmpeg_path():
+    """
+    Returns the local ffmpeg.exe path installed by ffmpeg-downloader.
+    """
+    ff = FFmpegDownloader().binary_path
+    if not os.path.isfile(ff):
+        raise FileNotFoundError("FFmpeg binary not found. Run: ffmpeg-downloader")
+    return ff
+
+
+def stream_audio_from_url(url: str, chunk_bytes: int):
+    """
+    Real-time MP3 streaming:
+    URL → ffmpeg (decode to PCM16) → yield fixed-size chunks.
+
+    No system ffmpeg needed.
+    """
+
+    ffmpeg_exe = get_ffmpeg_path()
+
+    print("\n🌐 Streaming MP3 over HTTP...")
+    print("🟦 Using embedded ffmpeg:", ffmpeg_exe)
+
+    # Start ffmpeg process
+    process = subprocess.Popen(
+        [
+            ffmpeg_exe,
+            "-i", url,              # read from URL directly
+            "-vn",                  # no video
+            "-acodec", "pcm_s16le", # PCM16
+            "-ac", "1",             # mono
+            "-ar", "16000",         # 16kHz
+            "-f", "s16le",          # raw PCM
+            "pipe:1"                # output to stdout
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=0
+    )
+
+    print("🎧 Decoding MP3 → PCM16 using ffmpeg...")
+    print("📡 Streaming chunks...")
+
     while True:
-        data = proc.stdout.read(chunk_bytes)
-        if not data:
+        chunk = process.stdout.read(chunk_bytes)
+        if not chunk:
             break
-        yield data
+        yield chunk

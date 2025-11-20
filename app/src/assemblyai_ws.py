@@ -1,9 +1,9 @@
+# app/src/assemblyai_ws.py
 """
-assemblyai_ws.py
-
-Minimal WebSocket client helper for AssemblyAI Realtime.
-AssemblyAI expects base64 frames wrapped as JSON {"type":"InputAudio","audio_data":"..."}
-and control messages like {"type":"StartStream"} and {"type":"StopStream"}.
+Minimal AssemblyAI Realtime WebSocket helper.
+- Send "StartStream" control
+- Send base64-encoded frames as {"type":"InputAudio","audio_data": "..."}
+- Receive transcript events
 """
 
 import json
