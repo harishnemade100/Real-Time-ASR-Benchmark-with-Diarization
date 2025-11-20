@@ -1,0 +1,15 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+numpy = "*"
+miniaudio = "*"
+websockets = "==11.0.3"
+pydub = "*"
+ffmpeg-python = "*"
+requests = "*"
+ffmpeg-downloader = "*"
+
+[dev-packages]

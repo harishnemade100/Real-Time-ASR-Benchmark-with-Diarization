@@ -1,0 +1,3 @@
+provider_name,segment_id,start_timestamp_sec,final_text_timestamp_iso,latency_ms,hypothesis_text,reference_text,S,I,D,N
+Deepgram,1,0,2025-11-14T16:30:12.123456+00:00,420,"Speaker 0: hello welcome back to the show","Speaker 0: Hello, welcome back to the show",0,0,0,6
+Deepgram,2,6,2025-11-14T16:30:18.567890+00:00,398,"Speaker 1: thank you for having me","Speaker 1: Thank you for having me",0,0,0,5
